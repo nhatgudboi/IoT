@@ -1,4 +1,5 @@
 #IoT
+
 HỆ THỐNG NHÀ THÔNG MINH (IoT)
 Giới thiệu
 Hệ thống nhà thông minh (Smart Home System) là ứng dụng IoT giúp người dùng điều khiển và giám sát các thiết bị điện trong nhà (như đèn, quạt, máy lạnh, cửa, cảm biến môi trường, v.v.) từ xa thông qua smartphone hoặc web.
