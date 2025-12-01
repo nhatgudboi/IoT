@@ -378,7 +378,7 @@ Dự án này được phát triển cho mục đích giáo dục và nghiên c�
 
 ## 👨‍💻 Tác giả
 
-Phát triển bởi SmartHome IoT Team
+Phát triển bởi SmartHome IoT Team (N6_HTTT_PTIT)
 
 ---
 
