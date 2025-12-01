@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🏠 SmartHome Dashboard - ESP32</title>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <link rel="stylesheet" href="styles.css">
+    
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+    
+    <!-- Face API.js for face recognition -->
+    <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.14/dist/face-api.min.js"></script>
+    
+    <script>
+        // Cấu hình Firebase
+        const firebaseConfig = {
+            apiKey: "AIzaSyAzGFnXElghlmMwHwcUgVvm76WD4U2fvw0",
+            authDomain: "smarthome-iot-2d485.firebaseapp.com",
+            databaseURL: "https://smarthome-iot-2d485-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "smarthome-iot-2d485",
+            storageBucket: "smarthome-iot-2d485.firebasestorage.app",
+            messagingSenderId: "213310468856",
+            appId: "1:213310468856:web:ebd4a01bc50283f8b8410d"
+        };
+
+        // Khởi tạo Firebase
+        firebase.initializeApp(firebaseConfig);
+        const database = firebase.database();
+    </script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-content">
+                <h1>🏠 SmartHome Dashboard</h1>
+                <p class="header-subtitle">Intelligent Home Automation System</p>
+            </div>
+            <div class="status-indicator">
+                <span id="connection-status" class="status-dot offline"></span>
+                <span id="connection-text">Đang kết nối...</span>
+            </div>
+        </header>
+
+        <div class="dashboard">
+            <!-- Gas Sensor Card -->
+            <div class="card gas-card">
+                <div class="card-header">
+                    <h2>🔍 Cảm Biến Khí Gas</h2>
+                    <span class="card-status" id="gas-status">Bình thường</span>
+                </div>
+                <div class="card-body">
+                    <div class="sensor-value">
+                        <span class="value" id="gas-value">0</span>
+                        <span class="unit">PPM</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="gas-progress"></div>
+                    </div>
+                    <div class="sensor-info">
+                        <div class="info-item">
+                            <span>Ngưỡng an toàn:</span>
+                            <span>0-1000 PPM</span>
+                        </div>
+                        <div class="info-item danger">
+                            <span>Nguy hiểm:</span>
+                            <span>>1000 PPM</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Light Sensor Card -->
+            <div class="card light-sensor-card">
+                <div class="card-header">
+                    <h2>☀️ Cảm Biến Ánh Sáng</h2>
+                    <span class="card-status" id="light-sensor-status">Sáng</span>
+                </div>
+                <div class="card-body">
+                    <div class="sensor-value">
+                        <div class="light-indicator" id="light-indicator">
+                            <div class="sun-icon" id="sun-icon">☀️</div>
+                            <div class="moon-icon" id="moon-icon">🌙</div>
+                        </div>
+                    </div>
+                    <div class="sensor-info">
+                        <div class="info-item">
+                            <span>Trạng thái:</span>
+                            <span id="light-sensor-text">Đang đọc...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Alert LED Card (Đèn Báo Động) -->
+            <div class="card alert-led-card">
+                <div class="card-header">
+                    <h2>🚨 Đèn Báo Động</h2>
+                    <span class="card-status" id="alert-led-status">Tắt</span>
+                </div>
+                <div class="card-body">
+                    <div class="control-section">
+                        <div class="device-icon alert-icon" id="alert-led-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="10"/>
+                                <path d="M12 6v6M12 16h.01"/>
+                            </svg>
+                        </div>
+                        <div class="info-text">
+                            <p>Đèn này tự động sáng khi phát hiện khí gas nguy hiểm</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Smart Light Card (Đèn Thông Minh) -->
+            <div class="card smart-light-card">
+                <div class="card-header">
+                    <h2>💡 Đèn Thông Minh</h2>
+                    <span class="card-status" id="smart-light-status">Tắt</span>
+                </div>
+                <div class="card-body">
+                    <div class="control-section">
+                        <div class="device-icon" id="smart-light-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M9 21h6M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+                            </svg>
+                        </div>
+                        
+                        <!-- Mode Toggle -->
+                        <div class="mode-toggle">
+                            <label class="toggle-label">
+                                <span>Chế độ:</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="auto-mode-toggle">
+                                    <span class="slider"></span>
+                                </label>
+                                <span id="mode-text">Tự động</span>
+                            </label>
+                        </div>
+
+                        <!-- Manual Control (chỉ hiện khi Manual mode) -->
+                        <div class="control-buttons" id="manual-control" style="display: none;">
+                            <button class="btn btn-on" id="smart-light-on">Bật Đèn</button>
+                            <button class="btn btn-off" id="smart-light-off">Tắt Đèn</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AI Face Unlock Card -->
+            <div class="card ai-card">
+                <div class="card-header">
+                    <h2>🤖 AI Face Unlock</h2>
+                    <span class="card-status" id="ai-status">Sẵn sàng</span>
+                </div>
+                <div class="card-body">
+                    <div class="control-section">
+                        <div class="device-icon ai-icon" id="ai-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M9 11a3 3 0 106 0M9 11a3 3 0 106 0M9 11v6a3 3 0 006 0v-6M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                            </svg>
+                        </div>
+                        <div class="ai-info">
+                            <p class="ai-description">Hệ thống nhận diện khuôn mặt tự động mở cửa</p>
+                            <div class="ai-status-display">
+                                <div class="status-item">
+                                    <span>Trạng thái:</span>
+                                    <span id="ai-status-text">Đang chờ...</span>
+                                </div>
+                                <div class="status-item">
+                                    <span>Lần mở gần nhất:</span>
+                                    <span id="ai-last-open">Chưa có</span>
+                                </div>
+                            </div>
+                        </div>
+                        <button class="btn btn-test" id="test-ai-door">Test Mở Cửa</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Door/Servo Card -->
+            <div class="card door-card">
+                <div class="card-header">
+                    <h2>🚪 Cửa Sổ</h2>
+                    <span class="card-status" id="door-status">Đóng</span>
+                </div>
+                <div class="card-body">
+                    <div class="control-section">
+                        <div class="device-icon door-icon" id="door-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                                <path d="M9 9h6M9 15h6"/>
+                            </svg>
+                        </div>
+                        <div class="door-info">
+                            <p>Tự động mở khi phát hiện gas hoặc nhận diện khuôn mặt</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AI Face Unlock Web Card -->
+            <div class="card ai-face-web-card">
+                <div class="card-header">
+                    <h2>📷 AI Face Unlock (Web)</h2>
+                    <span class="card-status" id="ai-web-status">Sẵn sàng</span>
+                </div>
+                <div class="card-body">
+                    <div class="face-recognition-section">
+                        <!-- Video Preview -->
+                        <div class="video-container">
+                            <video id="video" autoplay playsinline></video>
+                            <canvas id="canvas"></canvas>
+                            <div class="face-overlay" id="face-overlay"></div>
+                        </div>
+                        
+                        <!-- Controls -->
+                        <div class="face-controls">
+                            <button class="btn btn-start" id="start-camera">📷 Bật Camera</button>
+                            <button class="btn btn-stop" id="stop-camera" style="display: none;">⏹️ Tắt Camera</button>
+                            <button class="btn btn-train" id="train-face">🎓 Train Khuôn Mặt</button>
+                            <input type="file" id="face-image-input" accept="image/*" multiple style="display: none;">
+                            <small>💡 Có thể chọn nhiều ảnh cùng lúc để tăng độ chính xác</small>
+                        </div>
+                        
+                        <!-- Status Info -->
+                        <div class="face-status-info">
+                            <div class="status-item">
+                                <span>Trạng thái:</span>
+                                <span id="face-recognition-status">Chưa khởi động</span>
+                            </div>
+                            <div class="status-item">
+                                <span>Khuôn mặt đã train:</span>
+                                <span id="trained-faces-count">0</span>
+                            </div>
+                            <div class="status-item">
+                                <span>Tiến trình nhận diện:</span>
+                                <span id="matches-progress">0/8</span>
+                            </div>
+                            <div class="status-item">
+                                <span>Tham số:</span>
+                                <span style="font-size: 0.8rem;">Tolerance: 0.35 | Distance: 0.35</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Log Section -->
+        <div class="log-section">
+            <div class="log-header">
+                <h3>📋 Nhật Ký Hoạt Động</h3>
+                <button class="btn-clear-logs" id="clear-logs" title="Xóa nhật ký">🗑️</button>
+            </div>
+            <div class="log-container" id="log-container">
+                <div class="log-item success">Hệ thống đã khởi động...</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
