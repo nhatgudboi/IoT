@@ -299,23 +299,27 @@ void vTask_FirebaseUpload(void* pvParameters) {
 /**
  * Task 3: SMART LIGHT CONTROL (Priority: 2)
  * Core: 1 | Period: 100ms (nhanh để phản hồi cảm biến)
- * Mục đích: Đọc config auto/manual, điều khiển đèn thông minh.
+ * Mục đích: Điều khiển đèn thông minh theo cảm biến hoặc Firebase.
+ * Tối ưu: Non-blocking, dùng timer check config.
  */
 void vTask_SmartLight(void* pvParameters) {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xPeriod = pdMS_TO_TICKS(PERIOD_SMART_LIGHT);
+    const TickType_t xPeriod = pdMS_TO_TICKS(100);
 
-    unsigned long lastConfigFetch = 0;
+    unsigned long lastConfigCheck = 0;
     bool lastLightState = false;
 
     for (;;) {
         unsigned long now = millis();
 
-        // Đọc config Firebase mỗi 2 giây (tránh spam request)
-        if (now - lastConfigFetch >= PERIOD_FB_CONFIG) {
+        // Đọc cảm biến realtime
+        int lightValue = HAL_ReadLight(); // 0 = tối, 1 = sáng
+
+        // 1. Check config từ Firebase mỗi 2s (non-blocking)
+        if (now - lastConfigCheck >= 2000) {
             if (xSemaphoreTake(xFirebaseMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
                 if (Firebase.ready()) {
-                    // Đọc chế độ Auto/Manual
+                    // Đọc auto mode
                     if (Firebase.getBool(fbdo_cmd, "/smarthome/config/auto_mode")) {
                         if (fbdo_cmd.dataType() == "boolean") {
                             bool autoMode = fbdo_cmd.boolData();
@@ -325,7 +329,7 @@ void vTask_SmartLight(void* pvParameters) {
                             }
                         }
                     }
-                    // Nếu Manual mode → đọc lệnh bật/tắt
+                    // Nếu manual, đọc lệnh
                     bool currentAutoMode;
                     if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
                         currentAutoMode = sysState.isAutoMode;
@@ -348,51 +352,45 @@ void vTask_SmartLight(void* pvParameters) {
                 }
                 xSemaphoreGive(xFirebaseMutex);
             }
-            lastConfigFetch = now;
+            lastConfigCheck = now;
         }
 
-        // Đọc state, tính logic đèn
-        bool autoMode, isDark, newLightState, isAlarm;
+        // 2. Logic realtime
+        bool autoMode, newLightState, isAlarm;
         if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-            autoMode      = sysState.isAutoMode;
-            isDark        = (sysState.isDark == LOW);  // LOW = tối, bật đèn
+            autoMode = sysState.isAutoMode;
             newLightState = sysState.smartLightOn;
-            isAlarm       = sysState.isGasAlarm;
+            isAlarm = sysState.isGasAlarm;
             xSemaphoreGive(xStateMutex);
         } else {
             vTaskDelayUntil(&xLastWakeTime, xPeriod);
             continue;
         }
 
-        // Khi đang báo động gas → tắt đèn thông minh (an toàn điện)
+        // Tắt đèn nếu gas alarm
         if (isAlarm) {
             digitalWrite(PIN_SMART_LED, LOW);
             vTaskDelayUntil(&xLastWakeTime, xPeriod);
             continue;
         }
 
-        // Chế độ Auto: đèn theo cảm biến ánh sáng
+        // Logic đèn
         if (autoMode) {
-            newLightState = isDark;
+            newLightState = (lightValue == LOW); // LOW = tối, bật đèn
         }
 
         // Điều khiển phần cứng
         digitalWrite(PIN_SMART_LED, newLightState ? HIGH : LOW);
 
-        // Nếu thay đổi trạng thái → cập nhật Firebase
+        // Gửi status khi thay đổi
         if (newLightState != lastLightState) {
-            if (autoMode) { // chỉ ghi status khi auto mode
+            if (autoMode) {
                 if (xSemaphoreTake(xFirebaseMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
                     if (Firebase.ready()) {
                         Firebase.setBool(fbdo_cmd, "/smarthome/status/smart_light", newLightState);
                     }
                     xSemaphoreGive(xFirebaseMutex);
                 }
-            }
-            // Cập nhật state
-            if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                sysState.smartLightOn = newLightState;
-                xSemaphoreGive(xStateMutex);
             }
             lastLightState = newLightState;
         }
@@ -527,7 +525,7 @@ void setup() {
 
     // --- Khởi tạo GPIO ---
     pinMode(PIN_GAS_SENSOR,   INPUT);
-    pinMode(PIN_LIGHT_SENSOR, INPUT);
+    pinMode(PIN_LIGHT_SENSOR, INPUT_PULLUP);  // Thêm pull-up cho cảm biến digital
     pinMode(PIN_BUZZER,       OUTPUT);
     pinMode(PIN_ALERT_LED,    OUTPUT);
     pinMode(PIN_SMART_LED,    OUTPUT);
