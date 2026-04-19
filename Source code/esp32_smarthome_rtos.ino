@@ -117,9 +117,30 @@ void vTaskSensorRead(void* pvParam) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
   const TickType_t xPeriod = pdMS_TO_TICKS(50); // 50ms
 
+  // [TỐI ƯU] Sanity check counter: phát hiện cảm biến bị rút dây / hỏng
+  uint8_t gasZeroCount = 0;
+
   for (;;) {
-    int gas   = analogRead(GAS_PIN);
+    // [TỐI ƯU] ADC Averaging: đọc 4 lần lấy trung bình -> giảm nhiễu ~50%
+    // Khắc phục nguyên nhân gas FSM oscillation do PWM servo gây nhiễu ADC
+    int gasSum = 0;
+    for (int i = 0; i < 4; i++) {
+      gasSum += analogRead(GAS_PIN);
+      vTaskDelay(pdMS_TO_TICKS(2)); // 2ms giữa các lần đọc
+    }
+    int gas   = gasSum / 4;
     int light = digitalRead(LIGHT_PIN);
+
+    // [XỬ LÝ LỖI] Sensor sanity check
+    // Gas đọc 0 liên tục hơn 1 giây -> có thể cảm biến bị rút dây
+    if (gas == 0) {
+      if (++gasZeroCount >= 20) { // 20 x 50ms = 1s
+        Serial.println("[SENSOR] WARNING: Gas sensor may be disconnected (reading 0 continuously)!");
+        gasZeroCount = 0; // reset, tránh spam log
+      }
+    } else {
+      gasZeroCount = 0;
+    }
 
     // Bảo vệ ghi dữ liệu chia sẻ bằng mutex
     if (xSemaphoreTake(xDataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
@@ -281,17 +302,19 @@ void vTaskDoorFSM(void* pvParam) {
 
 // -------------------------------------------------------
 // TASK 4: Smart Light FSM Task (Priority: LOW = 2)
-// Chạy mỗi 200ms, xử lý logic đèn tự động / thủ công
+// [INTERRUPT-DRIVEN] Được đánh thức ngay lập tức khi ánh sáng thay đổi (ISR)
+// Fallback: timeout 200ms để vẫn check manual mode từ Firebase
 // -------------------------------------------------------
 void vTaskLightFSM(void* pvParam) {
-  TickType_t xLastWakeTime = xTaskGetTickCount();
-  const TickType_t xPeriod = pdMS_TO_TICKS(200); // 200ms
-
   for (;;) {
+    // [INTERRUPT] Chờ tín hiệu từ lightSensorISR HOAC timeout 200ms
+    // Auto  mode: ISR kích ngay khi trời tối/sáng -> phản hồi tức thì (microseconds)
+    // Manual mode: timeout 200ms -> check lệnh từ Firebase
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200));
+
     // Không xử lý đèn khi đang báo động
     EventBits_t events = xEventGroupGetBits(xSystemEvents);
     if (events & EVT_GAS_ALARM) {
-      vTaskDelayUntil(&xLastWakeTime, xPeriod);
       continue;
     }
 
@@ -310,7 +333,7 @@ void vTaskLightFSM(void* pvParam) {
     LightState_t nextState = lightState;
 
     if (autoMode) {
-      // AUTO: quyết định theo cảm biến ánh sáng
+      // AUTO: quyết định theo cảm biến ánh sáng (vừa được ISR thông báo thay đổi)
       if (light == HIGH) nextState = LIGHT_STATE_ON;
       else               nextState = LIGHT_STATE_OFF;
     } else {
@@ -318,21 +341,18 @@ void vTaskLightFSM(void* pvParam) {
       nextState = manualCmd ? LIGHT_STATE_ON : LIGHT_STATE_OFF;
     }
 
-    // [FIX BUG 2] Điều khiển phần cứng LIÊN TỤC (giống code cũ dòng 135)
-    // Tránh trường hợp nhiễu điện làm đèn sai trạng thái mà không được ghi lại
+    // Điều khiển phần cứng LIÊN TỤC
     digitalWrite(SMART_LED_PIN, nextState == LIGHT_STATE_ON ? HIGH : LOW);
 
-    // [FIX BUG 1] Chỉ upload Firebase khi state THAY ĐỔI
-    // KHÔNG gọi Firebase trực tiếp ở đây! Dùng flag để báo Firebase task
-    // tránh race condition trên fbdo (fbdo đang được Firebase task dùng ở Core 0)
+    // Chỉ upload Firebase khi state THAY ĐỔI
     if (nextState != lightState) {
       lightState = nextState;
-      Serial.printf("[FSM/LIGHT] -> %s (%s)\n",
+      Serial.printf("[FSM/LIGHT] -> %s (%s | trigger: %s)\n",
         lightState == LIGHT_STATE_ON ? "ON" : "OFF",
-        autoMode ? "Auto" : "Manual");
+        autoMode ? "Auto" : "Manual",
+        autoMode ? "INTERRUPT" : "Firebase poll");
 
       if (autoMode) {
-        // Set flag để Firebase task upload (an toàn, mutex-protected)
         if (xSemaphoreTake(xDataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
           sensorData.lightStateChanged = true;
           sensorData.lightStateValue   = (lightState == LIGHT_STATE_ON);
@@ -340,44 +360,106 @@ void vTaskLightFSM(void* pvParam) {
         }
       }
     }
-
-    vTaskDelayUntil(&xLastWakeTime, xPeriod);
   }
 }
 
 // -------------------------------------------------------
+// TASK 5 HELPERS: Firebase Retry Wrappers
+// [XỬ LÝ LỖI] Tự động thử lại khi Firebase call thất bại
+// vTaskDelay trong retry -> nhả CPU, không block task khác
+// -------------------------------------------------------
+bool fbUpdateNodeRetry(const char* path, FirebaseJson& json, uint8_t maxRetry = 3) {
+  for (uint8_t i = 0; i < maxRetry; i++) {
+    if (Firebase.updateNode(fbdo, path, json)) return true;
+    Serial.printf("[FB/RETRY] updateNode '%s' fail (%d/%d): %s\n",
+      path, i + 1, maxRetry, fbdo.errorReason().c_str());
+    vTaskDelay(pdMS_TO_TICKS(300 * (i + 1))); // backoff: 300ms, 600ms, 900ms
+  }
+  Serial.printf("[FB/RETRY] updateNode '%s' GAVE UP\n", path);
+  return false;
+}
+
+bool fbSetBoolRetry(const char* path, bool val, uint8_t maxRetry = 3) {
+  for (uint8_t i = 0; i < maxRetry; i++) {
+    if (Firebase.setBool(fbdo, path, val)) return true;
+    Serial.printf("[FB/RETRY] setBool '%s' fail (%d/%d): %s\n",
+      path, i + 1, maxRetry, fbdo.errorReason().c_str());
+    vTaskDelay(pdMS_TO_TICKS(300 * (i + 1)));
+  }
+  return false;
+}
+
+bool fbGetBoolRetry(const char* path, bool& outVal, uint8_t maxRetry = 2) {
+  for (uint8_t i = 0; i < maxRetry; i++) {
+    if (Firebase.getBool(fbdo, path) && fbdo.dataType() == "boolean") {
+      outVal = fbdo.boolData();
+      return true;
+    }
+    vTaskDelay(pdMS_TO_TICKS(200 * (i + 1)));
+  }
+  return false; // outVal giữ nguyên giá trị cũ -> fail-safe
+}
+
+// -------------------------------------------------------
 // TASK 5: Firebase I/O Task (Priority: LOW = 2)
-// Scheduler: Upload sensor data mỗi 1s
-//            Poll config/commands mỗi 2s
-//            Poll AI door command mỗi 1.5s
+// Scheduler: Upload sensor data mỗi 1s (batch JSON)
+//            Poll config/commands mỗi 2s  (có retry)
+//            Poll AI door command mỗi 1.5s (có retry)
+//            WiFi reconnect check mỗi 5s
 // -------------------------------------------------------
 void vTaskFirebase(void* pvParam) {
-  // Chờ WiFi sẵn sàng trước khi bắt đầu
   xEventGroupWaitBits(xSystemEvents, EVT_WIFI_READY, pdFALSE, pdTRUE, portMAX_DELAY);
 
-  // Dùng Task Notification hoặc xTaskDelayUntil để tạo scheduler chuẩn
-  // Lưu các "hạn deadline" cho từng subtask
   TickType_t tNextUpload    = xTaskGetTickCount();
   TickType_t tNextConfig    = xTaskGetTickCount();
   TickType_t tNextAICheck   = xTaskGetTickCount();
+  TickType_t tNextWifiCheck = xTaskGetTickCount();
 
-  const TickType_t T_UPLOAD  = pdMS_TO_TICKS(1000);   // 1s
-  const TickType_t T_CONFIG  = pdMS_TO_TICKS(2000);   // 2s
-  const TickType_t T_AI      = pdMS_TO_TICKS(1500);   // 1.5s
-  const TickType_t T_LOOP    = pdMS_TO_TICKS(100);    // vòng lặp chính mỗi 100ms
+  const TickType_t T_UPLOAD     = pdMS_TO_TICKS(1000);  // 1s
+  const TickType_t T_CONFIG     = pdMS_TO_TICKS(2000);  // 2s
+  const TickType_t T_AI         = pdMS_TO_TICKS(1500);  // 1.5s
+  const TickType_t T_WIFI_CHECK = pdMS_TO_TICKS(5000);  // 5s
+  const TickType_t T_LOOP       = pdMS_TO_TICKS(100);   // vòng lặp chính
 
   for (;;) {
+    TickType_t now = xTaskGetTickCount();
+
+    // --- [XỬ LÝ LỖI] WiFi Reconnect: kiểm tra mỗi 5s ---
+    if ((now - tNextWifiCheck) >= T_WIFI_CHECK) {
+      tNextWifiCheck = now;
+      if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[WIFI] Connection lost! Reconnecting...");
+        xEventGroupClearBits(xSystemEvents, EVT_WIFI_READY | EVT_FB_READY);
+        WiFi.reconnect();
+        uint8_t attempts = 0;
+        while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+          vTaskDelay(pdMS_TO_TICKS(500));
+          Serial.print(".");
+          attempts++;
+        }
+        if (WiFi.status() == WL_CONNECTED) {
+          Serial.println("\n[WIFI] Reconnected!");
+          xEventGroupSetBits(xSystemEvents, EVT_WIFI_READY);
+        } else {
+          Serial.println("\n[WIFI] Reconnect failed, retry in 5s");
+          vTaskDelay(pdMS_TO_TICKS(5000));
+          tNextWifiCheck = xTaskGetTickCount(); // reset timer SAU khi thất bại
+        }
+        continue; // bỏ qua Firebase ops cycle này
+      }
+    }
+
+    // --- [XỬ LÝ LỖI] Firebase ready check ---
     if (!Firebase.ready()) {
+      xEventGroupClearBits(xSystemEvents, EVT_FB_READY); // Clear chính xác khi mất kết nối
       vTaskDelay(T_LOOP);
       continue;
     }
-
     xEventGroupSetBits(xSystemEvents, EVT_FB_READY);
-    TickType_t now = xTaskGetTickCount();
+    now = xTaskGetTickCount(); // refresh sau khi có thể đã chờ
 
-    // --- Subtask A: Upload sensor data ---
+    // --- Subtask A: Upload sensor data (batch) ---
     if ((now - tNextUpload) >= T_UPLOAD) {
-      // Khởi tạo: nếu mutex thất bại thì gotData=false, bỏ qua upload lần này
       int  gas = 0, light = 0;
       bool lightChanged = false, lightVal = false;
       bool gotData = false;
@@ -387,40 +469,33 @@ void vTaskFirebase(void* pvParam) {
         light        = sensorData.lightValue;
         lightChanged = sensorData.lightStateChanged;
         lightVal     = sensorData.lightStateValue;
-        if (lightChanged) sensorData.lightStateChanged = false; // clear flag
+        if (lightChanged) sensorData.lightStateChanged = false;
         xSemaphoreGive(xDataMutex);
         gotData = true;
       }
 
-      // Chỉ upload khi lấy được dữ liệu thực (tránh gửi rác lên Firebase)
       if (gotData) {
-        Firebase.setInt(fbdo, "/smarthome/data/gas",          gas);
-        Firebase.setInt(fbdo, "/smarthome/data/light_sensor", light);
+        // [TỐI ƯU] Batch write: 1 HTTP request thay vì 2 setInt riêng lẻ
+        FirebaseJson dataJson;
+        dataJson.set("gas",          gas);
+        dataJson.set("light_sensor", light);
+        fbUpdateNodeRetry("/smarthome/data", dataJson);
 
-        // [FIX BUG 1] Upload light status TỪ Firebase task (không từ LightFSM)
-        // -> an toàn vì fbdo chỉ được dùng bởi 1 task duy nhất (task này)
         if (lightChanged) {
-          Firebase.setBool(fbdo, "/smarthome/status/smart_light", lightVal);
+          fbSetBoolRetry("/smarthome/status/smart_light", lightVal);
         }
       }
-
       tNextUpload = now;
     }
 
-    // --- Subtask B: Poll config (auto_mode + manual light) ---
+    // --- Subtask B: Poll config ---
     if ((now - tNextConfig) >= T_CONFIG) {
-      bool autoMode = true;
-      bool manualLight = false;
-
-      if (Firebase.getBool(fbdo, "/smarthome/config/auto_mode")) {
-        if (fbdo.dataType() == "boolean") autoMode = fbdo.boolData();
-      }
+      bool autoMode = true, manualLight = false;
+      // [XỬ LÝ LỖI] Retry getBool; nếu thất bại giữ nguyên giá trị cũ (fail-safe)
+      fbGetBoolRetry("/smarthome/config/auto_mode", autoMode);
       if (!autoMode) {
-        if (Firebase.getBool(fbdo, "/smarthome/commands/smart_light")) {
-          if (fbdo.dataType() == "boolean") manualLight = fbdo.boolData();
-        }
+        fbGetBoolRetry("/smarthome/commands/smart_light", manualLight);
       }
-
       if (xSemaphoreTake(xDataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         sensorData.isAutoMode     = autoMode;
         sensorData.manualLightCmd = manualLight;
@@ -429,20 +504,19 @@ void vTaskFirebase(void* pvParam) {
       tNextConfig = now;
     }
 
-    // --- Subtask C: Poll AI door command ---
+    // --- Subtask C: Poll AI door ---
     if ((now - tNextAICheck) >= T_AI) {
-      if (Firebase.getBool(fbdo, "/smarthome/commands/ai_door")) {
-        if (fbdo.dataType() == "boolean" && fbdo.boolData() == true) {
-          Serial.println("[FB] AI Door Command received -> Queue");
-          bool openCmd = true;
-          xQueueSend(xDoorCmdQueue, &openCmd, 0); // Non-blocking send
-          Firebase.setBool(fbdo, "/smarthome/commands/ai_door", false); // Reset
-        }
+      bool aiDoor = false;
+      if (fbGetBoolRetry("/smarthome/commands/ai_door", aiDoor) && aiDoor) {
+        Serial.println("[FB] AI Door Command -> Queue");
+        bool openCmd = true;
+        xQueueSend(xDoorCmdQueue, &openCmd, 0);
+        fbSetBoolRetry("/smarthome/commands/ai_door", false);
       }
       tNextAICheck = now;
     }
 
-    vTaskDelay(T_LOOP); // Nhả CPU cho task khác
+    vTaskDelay(T_LOOP);
   }
 }
 
@@ -482,13 +556,31 @@ void vTaskLogger(void* pvParam) {
     );
     Serial.println("====================================\n");
 
-    // In stack watermark để debug bộ nhớ
-    Serial.printf("  Stack free (Sensor):  %d\n", uxTaskGetStackHighWaterMark(hTaskSensor));
-    Serial.printf("  Stack free (GasFSM):  %d\n", uxTaskGetStackHighWaterMark(hTaskGasFSM));
-    Serial.printf("  Stack free (Firebase):%d\n", uxTaskGetStackHighWaterMark(hTaskFirebase));
+    // [XỬ LÝ LỖI] Stack overflow guard: cảnh báo khi stack gần đầy
+    UBaseType_t sWM = uxTaskGetStackHighWaterMark(hTaskSensor);
+    UBaseType_t gWM = uxTaskGetStackHighWaterMark(hTaskGasFSM);
+    UBaseType_t fWM = uxTaskGetStackHighWaterMark(hTaskFirebase);
+    Serial.printf("  Stack free: Sensor=%d Gas=%d Firebase=%d (words)\n", sWM, gWM, fWM);
+    if (sWM < 50)  Serial.println("  [!!] CRITICAL: SensorRead stack near overflow!");
+    if (gWM < 50)  Serial.println("  [!!] CRITICAL: GasFSM stack near overflow!");
+    if (fWM < 200) Serial.println("  [!!] CRITICAL: Firebase stack near overflow!");
 
     vTaskDelayUntil(&xLastWakeTime, xPeriod);
   }
+}
+
+// ===========================================================
+//  ISR: LIGHT SENSOR HARDWARE INTERRUPT
+//  IRAM_ATTR: bắc buộc phải có - ISR chạy từ Internal RAM
+//  để đảm bảo tốc độ ngay cả khi Flash cache bị busy
+//  Quy tắc ISR: NGẮ N + NHANH, không delay, không Serial
+// ===========================================================
+void IRAM_ATTR lightSensorISR() {
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  // Đánh thức LightFSM task ngay lập tức (không chờ 200ms poll)
+  vTaskNotifyGiveFromISR(hTaskLightFSM, &xHigherPriorityTaskWoken);
+  // Nếu LightFSM có priority cao hơn task đang chạy -> context switch ngay
+  portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 // ===========================================================
@@ -545,8 +637,13 @@ void setup() {
   xTaskCreatePinnedToCore(vTaskGasFSM,     "GasFSM",     2048, NULL, 4, &hTaskGasFSM,   1);
   xTaskCreatePinnedToCore(vTaskDoorFSM,    "DoorFSM",    3072, NULL, 3, &hTaskDoorFSM,  1);
   xTaskCreatePinnedToCore(vTaskLightFSM,   "LightFSM",   2048, NULL, 2, &hTaskLightFSM, 1);
-  xTaskCreatePinnedToCore(vTaskFirebase,   "Firebase",   8192, NULL, 2, &hTaskFirebase,  0); // Core 0 riêng cho WiFi
+  xTaskCreatePinnedToCore(vTaskFirebase,   "Firebase",   8192, NULL, 2, &hTaskFirebase,  0);
   xTaskCreatePinnedToCore(vTaskLogger,     "Logger",     2048, NULL, 1, &hTaskLogger,    1);
+
+  // [INTERRUPT] Đăng ký hardware interrupt cho cảm biến ánh sáng
+  // Phải đăng ký SAU khi hTaskLightFSM đã được tạo -> ISR có handle hợp lệ
+  // CHANGE: trigger cả LOW->HIGH (trời tối) và HIGH->LOW (trời sáng)
+  attachInterrupt(digitalPinToInterrupt(LIGHT_PIN), lightSensorISR, CHANGE);
 
   Serial.println("[SETUP] All RTOS tasks created. System running.");
 }
