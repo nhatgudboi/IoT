@@ -71,6 +71,7 @@ const char* password = "nhatnguyen6176";
 #define GAS_HIGH_THRESHOLD   1000
 #define GAS_LOW_THRESHOLD    900
 #define LIGHT_LOW_THRESHOLD  500  // Ngưỡng tối cho cảm biến ánh sáng (analog, 0-4095)
+#define AI_DOOR_OPEN_TIME_MS 5000  // Thời gian cửa mở sau khi AI nhận diện
 
 // Task periods (ms)
 #define PERIOD_GAS_CHECK      20
