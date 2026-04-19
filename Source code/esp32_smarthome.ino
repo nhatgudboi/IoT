@@ -70,7 +70,6 @@ const char* password = "nhatnguyen6176";
 // ============================================================
 #define GAS_HIGH_THRESHOLD   1000
 #define GAS_LOW_THRESHOLD    900
-#define LIGHT_LOW_THRESHOLD  500  // Ngưỡng tối cho cảm biến ánh sáng (analog, 0-4095)
 #define AI_DOOR_OPEN_TIME_MS 5000  // Thời gian cửa mở sau khi AI nhận diện
 
 // Task periods (ms)
@@ -173,9 +172,9 @@ inline int HAL_ReadGas() {
     return analogRead(PIN_GAS_SENSOR);
 }
 
-/** Đọc cảm biến ánh sáng (Analog) */
+/** Đọc cảm biến ánh sáng (Digital) */
 inline int HAL_ReadLight() {
-    return analogRead(PIN_LIGHT_SENSOR);
+    return digitalRead(PIN_LIGHT_SENSOR);
 }
 
 // ============================================================
@@ -356,7 +355,7 @@ void vTask_SmartLight(void* pvParameters) {
         bool autoMode, isDark, newLightState, isAlarm;
         if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
             autoMode      = sysState.isAutoMode;
-            isDark        = (sysState.isDark < LIGHT_LOW_THRESHOLD);  // So sánh với ngưỡng analog
+            isDark        = (sysState.isDark == LOW);  // LOW = tối, bật đèn
             newLightState = sysState.smartLightOn;
             isAlarm       = sysState.isGasAlarm;
             xSemaphoreGive(xStateMutex);
@@ -509,6 +508,9 @@ void vTask_StatusLog(void* pvParameters) {
                       ESP.getFreeHeap());
         Serial.printf("| Stack HWM → GasSafety: %u | Firebase: %u | AI: %u\n",
                       gasHighWater, fbHighWater, aiHighWater);
+        Serial.printf("DEBUG: Light Sensor = %d (LOW=tối) | isDark = %s | isAlarm = %s | autoMode = %s\n", 
+                      lightSensor, (lightSensor == LOW) ? "YES" : "NO",
+                      alarm ? "YES" : "NO", autoMode ? "YES" : "NO");
         Serial.println("===================================================\n");
 
         vTaskDelayUntil(&xLastWakeTime, xPeriod);
