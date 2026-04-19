@@ -219,7 +219,7 @@ function startFirebaseListener() {
     dbRef.child('data/gas').on('value', (snapshot) => {
         if (snapshot.exists()) {
             const gasValue = snapshot.val();
-            const isDanger = gasValue > 1000;
+            const isDanger = gasValue >= 1000; // Đồng bộ với GAS_HIGH = 1000 trong .ino
            
             // Cập nhật trạng thái báo động
             deviceState.alertLedOn = isDanger;
