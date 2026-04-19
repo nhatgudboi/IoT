@@ -70,7 +70,7 @@ const char* password = "nhatnguyen6176";
 // ============================================================
 #define GAS_HIGH_THRESHOLD   1000
 #define GAS_LOW_THRESHOLD    900
-#define AI_DOOR_OPEN_TIME_MS 5000  // Thời gian cửa mở sau khi AI nhận diện
+#define LIGHT_LOW_THRESHOLD  500  // Ngưỡng tối cho cảm biến ánh sáng (analog, 0-4095)
 
 // Task periods (ms)
 #define PERIOD_GAS_CHECK      20
@@ -172,9 +172,9 @@ inline int HAL_ReadGas() {
     return analogRead(PIN_GAS_SENSOR);
 }
 
-/** Đọc cảm biến ánh sáng (Digital) */
+/** Đọc cảm biến ánh sáng (Analog) */
 inline int HAL_ReadLight() {
-    return digitalRead(PIN_LIGHT_SENSOR);
+    return analogRead(PIN_LIGHT_SENSOR);
 }
 
 // ============================================================
@@ -234,7 +234,7 @@ void vTask_GasSafety(void* pvParameters) {
         // Ghi state (mutex ngắn, không block lâu)
         if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
             sysState.gasValue  = rawGas;
-            sysState.isDark    = rawDark;
+            sysState.isDark    = rawDark;  // Giờ là giá trị analog
             sysState.isGasAlarm = newAlarm;
             xSemaphoreGive(xStateMutex);
         }
@@ -355,7 +355,7 @@ void vTask_SmartLight(void* pvParameters) {
         bool autoMode, isDark, newLightState, isAlarm;
         if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
             autoMode      = sysState.isAutoMode;
-            isDark        = (sysState.isDark == HIGH);
+            isDark        = (sysState.isDark < LIGHT_LOW_THRESHOLD);  // So sánh với ngưỡng analog
             newLightState = sysState.smartLightOn;
             isAlarm       = sysState.isGasAlarm;
             xSemaphoreGive(xStateMutex);
@@ -478,16 +478,17 @@ void vTask_StatusLog(void* pvParameters) {
 
     for (;;) {
         // Snapshot state an toàn
-        int   gas;
+        int   gas, lightSensor;
         bool  alarm, autoMode, lightOn, aiDoor;
         UBaseType_t gasHighWater, fbHighWater, aiHighWater;
 
         if (xSemaphoreTake(xStateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            gas      = sysState.gasValue;
-            alarm    = sysState.isGasAlarm;
-            autoMode = sysState.isAutoMode;
-            lightOn  = sysState.smartLightOn;
-            aiDoor   = sysState.aiDoorOpen;
+            gas         = sysState.gasValue;
+            lightSensor = sysState.isDark;  // Giá trị analog cảm biến ánh sáng
+            alarm       = sysState.isGasAlarm;
+            autoMode    = sysState.isAutoMode;
+            lightOn     = sysState.smartLightOn;
+            aiDoor      = sysState.aiDoorOpen;
             xSemaphoreGive(xStateMutex);
         }
 
@@ -497,14 +498,14 @@ void vTask_StatusLog(void* pvParameters) {
         aiHighWater  = uxTaskGetStackHighWaterMark(xTaskAICommand);
 
         Serial.println("============= [ HE THONG SMARTHOME ] =============");
-        Serial.printf("| Gas: %-5d | Alarm: %-3s | Light: %-3s | AI Door: %-3s\n",
-                      gas,
+        Serial.printf("| Gas: %-5d | Light Sensor: %-5d | Alarm: %-3s | AI Door: %-3s\n",
+                      gas, lightSensor,
                       alarm    ? "ON"  : "OFF",
-                      lightOn  ? "ON"  : "OFF",
                       aiDoor   ? "OPEN": "SHUT");
-        Serial.printf("| Mode: %-7s | Core0 Free: %d bytes | Core1 Free: %d bytes\n",
+        Serial.printf("| Smart Light: %-3s | Mode: %-7s | Core0 Free: %d bytes\n",
+                      lightOn  ? "ON"  : "OFF",
                       autoMode ? "AUTO" : "MANUAL",
-                      ESP.getFreeHeap(), gasHighWater * sizeof(StackType_t));
+                      ESP.getFreeHeap());
         Serial.printf("| Stack HWM → GasSafety: %u | Firebase: %u | AI: %u\n",
                       gasHighWater, fbHighWater, aiHighWater);
         Serial.println("===================================================\n");
